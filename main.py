@@ -26,17 +26,33 @@ async def main():
         print(f"❌ 初始化失败: {e}")
         return
 
-    # 3. 定义用户请求
-    user_query = "请帮我审查一下 `agent_framework/memory.py` 这个代码文件，看看在并发场景下有没有潜在的隐患，或者类型提示方面有什么可以改进的。"
-
-    # 4. 运行 Agent 流程
-    print(f"\n\n🚀 用户发起请求: '{user_query}'")
-    final_result = await agent.chat(user_prompt=user_query)
-
-    print("\n\n=========================================")
-    print("🎉 对话结束，最终结果:")
-    print(final_result)
-    print("=========================================\n")
+    # 3. 启动交互式对话循环
+    print("\n✅ Agent 初始化成功！现在你可以开始与它对话了。")
+    print("💡 提示：输入 'exit', 'quit', 'q' 或 按 Ctrl+C/Ctrl+D 退出程序。\n")
+    
+    # 创建一个持久的 session_id
+    session_id = agent.memory_manager.start_new_session()
+    
+    while True:
+        try:
+            user_query = input("\n🧑 用户: ").strip()
+            if user_query.lower() in ['exit', 'quit', 'q', 'bye']:
+                print("👋 再见！")
+                break
+            if not user_query:
+                continue
+                
+            # 运行 Agent 流程 (复用同一个 session_id 以保留记忆)
+            final_result = await agent.chat(user_prompt=user_query, session_id=session_id)
+            
+            print(f"\n🤖 Agent:\n{final_result}")
+            
+        except (KeyboardInterrupt, EOFError):
+            print("\n👋 强制退出，再见！")
+            break
+        except Exception as e:
+            print(f"\n❌ 发生意外错误: {e}")
+            break
 
 
 if __name__ == "__main__":

@@ -37,64 +37,85 @@ class AIAgentCore:
         self.memory_manager.add_message(session_id, "user", user_prompt)
 
         try:
-            # --- LLM 调用占位符：构建 System Prompt 和 Message History ---
+            # 动态生成工具描述，不再硬编码
+            available_tools = list(self.tool_executor.tools.keys())
+            tools_desc = f"可用工具: {', '.join(available_tools)}\n(注意：run_shell 需要 'command' 参数；search_files 需要 'pattern' 参数；read_file 需要 'file_path' 参数)"
+
             system_prompt = (
-                "你是一个资深的顶级代码审查员 (Code Reviewer)。你的任务是严格检查用户提供的代码或文件，"
-                "寻找潜在的 Bug、安全漏洞、性能瓶颈以及代码风格规范(PEP 8等)问题，并提供优化建议。"
-                "你可以使用 `read_file` 工具读取目标文件内容，或使用 `run_shell` 执行静态扫描(如 pylint)。"
+                "你是一个强大的全能本地 AI 助手。你的任务是通过思考并调用工具来帮用户解决各种复杂问题。\n"
                 "请遵循 ReAct 模式：思考 -> 行动 -> 观察。\n"
+                f"{tools_desc}\n"
                 "如果需要调用工具，请严格按照以下 JSON 格式输出（必须放在 ```json 和 ``` 之间）：\n"
                 "```json\n"
                 "{\n"
-                "  \"action\": \"工具名称 (如 read_file)\",\n"
-                "  \"kwargs\": {\"file_path\": \"要读取的文件路径\"}\n"
+                "  \"action\": \"工具名称\",\n"
+                "  \"kwargs\": {\"参数名\": \"参数值\"}\n"
                 "}\n"
                 "```\n"
-                "如果你已经获得了足够的信息，请直接输出最终的代码审查报告。"
+                "如果你已经获得了足够的信息，或者不需要调用工具就能回答，请直接向用户输出最终的解答内容（不要包含 JSON 工具调用块）。"
             )
 
-            # 2. 调用 LLM，让它进行推理并决定下一步 (Thinking & Acting)
-            print("\n[Agent] 🧠 正在构建 Prompt 并与 LLM 通信...")
-            
-            # TODO: 在实际项目中，这里需要复杂的 Pydantic Tool Calling 或 Function Calling 逻辑来从模型获取工具调用指令。
-            # 为了框架展示，我们模拟一次成功调用：
+            # 2. ReAct 循环 (限制最大迭代次数防止死循环)
+            max_iterations = 10
+            for i in range(max_iterations):
+                print(f"\n[Agent] 🧠 正在思考并与 LLM 通信 (第 {i+1} 轮)...")
+                
+                # 获取 LLM 响应
+                response_content = await self._llm_call(system_prompt, session_id)
+                
+                # 记录助手的思考过程 (关键：这让模型在下一轮知道自己刚刚思考过什么)
+                self.memory_manager.add_message(session_id, "assistant", response_content)
 
-            response_content = await self._llm_call(system_prompt, session_id)
+                # 3. 尝试从模型响应中提取 JSON 工具调用指令
+                json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_content, re.DOTALL)
+                
+                if json_match:
+                    try:
+                        # 提取并打印大模型的思考过程 (解释它为什么要调用这个工具)
+                        thought_process = response_content[:json_match.start()].strip()
+                        if thought_process:
+                            print(f"\n[Agent 思考过程]:\n{thought_process}")
 
-            # 3. 尝试从模型响应中提取 JSON 工具调用指令
-            json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_content, re.DOTALL)
-            
-            if json_match:
-                try:
-                    action_data = json.loads(json_match.group(1))
-                    tool_name = action_data.get("action")
-                    kwargs = action_data.get("kwargs", action_data.get("args", {})) # 兼容模型使用 args 字段
-                    
-                    # 容错：如果模型使用了 path 而不是 file_path
-                    if "path" in kwargs and "file_path" not in kwargs:
-                        kwargs["file_path"] = kwargs.pop("path")
+                        action_data = json.loads(json_match.group(1))
+                        tool_name = action_data.get("action")
+                        kwargs = action_data.get("kwargs", action_data.get("args", {})) 
+                        
+                        if "path" in kwargs and "file_path" not in kwargs:
+                            kwargs["file_path"] = kwargs.pop("path")
 
-                    # 4. 执行工具 (Observation)
-                    observation = self.tool_executor.invoke(tool_name, **kwargs)
-                    print(f"\n[Agent] 🟢 工具 '{tool_name}' 观察结果已接收。")
-                    
-                    # 5. 将 Observation 添加回内存，并再次调用 LLM 进行最终总结
-                    self.memory_manager.add_message(session_id, "tool", observation)
-                    final_response = await self._llm_call(system_prompt + "\n请根据观察到的工具结果，给出详细的代码审查报告。", session_id)
-                except Exception as e:
-                    print(f"\n[Agent] 🔴 工具执行出错: {e}")
-                    final_response = f"尝试执行工具时出错: {e}\n模型原始回复: {response_content}"
-            else:
-                # 直接文本回复或已包含结论
-                print("\n[Agent] 💬 模型直接生成了回复。")
-                final_response = response_content
+                        # 4. 拦截并请求用户授权
+                        print(f"\n⚠️ [安全拦截] Agent 申请调用工具: '{tool_name}'")
+                        print(f"   执行参数: {json.dumps(kwargs, ensure_ascii=False)}")
+                        user_approval = input("   是否允许执行？(Y/n): ").strip().lower()
+                        
+                        if user_approval in ['', 'y', 'yes']:
+                            # 用户同意，执行工具
+                            observation = self.tool_executor.invoke(tool_name, **kwargs)
+                            self.memory_manager.add_message(session_id, "tool", observation)
+                        else:
+                            # 用户拒绝，将结果返回给大模型让其重新决策
+                            print("   🚫 已拒绝执行该工具。")
+                            observation = "【系统提示：用户拒绝了该工具的执行申请。请调整你的策略，或者直接向用户回复。】"
+                            self.memory_manager.add_message(session_id, "tool", observation)
+                    except Exception as e:
+                        error_msg = f"工具解析或执行出错: {e}"
+                        print(f"\n[Agent] 🔴 {error_msg}")
+                        self.memory_manager.add_message(session_id, "tool", error_msg)
+                    # 继续下一轮循环 (模型会收到包含 tool 结果的历史记录并继续思考)
+                else:
+                    # 如果没有调用工具，说明模型已经给出了最终答案，直接退出循环
+                    print("\n[Agent] 💬 任务完成，正在回复用户。")
+                    return response_content
+
+            # 如果超出循环次数还没结束
+            timeout_msg = "🛑 达到最大思考轮数，任务已被迫终止。"
+            self.memory_manager.add_message(session_id, "assistant", timeout_msg)
+            return timeout_msg
 
         except Exception as e:
-            final_response = f"🛑 发生致命错误：{e}"
-            
-        # 6. 将最终响应添加回内存并返回给用户
-        self.memory_manager.add_message(session_id, "assistant", final_response)
-        return final_response
+            error_msg = f"🛑 发生致命错误：{e}"
+            self.memory_manager.add_message(session_id, "assistant", error_msg)
+            return error_msg
 
     async def _llm_call(self, system_prompt: str, session_id: str) -> str:
         """内部方法，通过直接发起 HTTP 请求处理与 LLM 的通信。"""
