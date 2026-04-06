@@ -1,0 +1,11 @@
+# 环境变量配置（包含敏感 API Key，绝对不能提交！）
+.env
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 虚拟环境 (如果你使用了)
+venv/
+.venv/
+env/
