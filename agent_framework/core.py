@@ -53,8 +53,8 @@ class AIAgentCore:
 
         try:
             # 动态生成工具描述，不再硬编码
-            available_tools = list(self.tool_executor.tools.keys())
-            tools_desc = f"可用工具: {', '.join(available_tools)}\n(注意：run_shell 需要 'command' 参数；search_files 需要 'pattern' 参数；read_file 需要 'file_path' 参数)"
+            # 将 Pydantic 生成的 JSON Schema 注入到 Prompt 中
+            tools_desc = f"可用工具及其参数说明 (JSON Schema 格式):\n{self.tool_executor.get_all_tools_schema()}"
 
             # 获取当前操作系统信息
             current_os = platform.system()
