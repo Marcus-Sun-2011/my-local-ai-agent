@@ -1,4 +1,5 @@
 import re
+import os
 import logging
 from typing import Dict, List, Any, Callable
 from pydantic import BaseModel
@@ -18,6 +19,64 @@ class WorkflowStep(BaseModel):
 class MarkdownWorkflow(BaseModel):
     title: str
     steps: List[WorkflowStep]
+
+# ==========================================
+# 1.5 解析 Markdown 工作流文件
+# ==========================================
+def parse_markdown_workflow(md_content: str) -> MarkdownWorkflow:
+    """
+    从规范的 Markdown 文本中解析出 MarkdownWorkflow 对象
+    """
+    # 解析工作流标题 (# 标题)
+    title_match = re.search(r'^#\s+(.+)', md_content, re.MULTILINE)
+    title = title_match.group(1).strip() if title_match else "未命名工作流"
+    
+    steps = []
+    # 匹配形如 "## Step 1: 获取数据" 到下一个 Step 或结尾的内容区块
+    step_matches = re.finditer(r'##\s+Step\s+([^:]+):\s+(.*?)\n(.*?)(?=##\s+Step|\Z)', md_content, re.DOTALL | re.IGNORECASE)
+    
+    for match in step_matches:
+        step_id = match.group(1).strip()
+        step_title = match.group(2).strip()
+        content = match.group(3)
+        
+        # 解析工具、依赖和指令 (兼容带有加粗 ** 的写法)
+        tools_match = re.search(r'-\s+\*?\*?Tools\*?\*?:\s*(.*)', content, re.IGNORECASE)
+        deps_match = re.search(r'-\s+\*?\*?Dependencies\*?\*?:\s*(.*)', content, re.IGNORECASE)
+        inst_match = re.search(r'-\s+\*?\*?Instruction\*?\*?:\s*(.*)', content, re.IGNORECASE)
+        
+        tools = [t.strip() for t in tools_match.group(1).split(',')] if tools_match and tools_match.group(1).strip() else []
+        deps = [d.strip() for d in deps_match.group(1).split(',')] if deps_match and deps_match.group(1).strip() else []
+        instruction = inst_match.group(1).strip() if inst_match else ""
+        
+        steps.append(WorkflowStep(
+            step_id=step_id, title=step_title, tools=tools, dependencies=deps, instruction=instruction
+        ))
+        
+    return MarkdownWorkflow(title=title, steps=steps)
+
+# ==========================================
+# 1.6 从目录批量加载工作流
+# ==========================================
+def load_workflows_from_directory(directory: str) -> Dict[str, MarkdownWorkflow]:
+    """
+    扫描指定目录，加载所有 Markdown 工作流文件
+    返回格式: {"filename.md": MarkdownWorkflow}
+    """
+    workflows = {}
+    if not os.path.exists(directory):
+        logging.warning(f"工作流目录 '{directory}' 不存在，跳过加载。")
+        return workflows
+        
+    for filename in os.listdir(directory):
+        if filename.endswith(".md"):
+            filepath = os.path.join(directory, filename)
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+                workflow = parse_markdown_workflow(content)
+                workflows[filename] = workflow
+                logging.info(f"📂 已加载工作流: {workflow.title} ({filename})")
+    return workflows
 
 # ==========================================
 # 2. AgentToolExecutor (集成注册表模式)
@@ -113,15 +172,16 @@ if __name__ == "__main__":
             return {"actions": [{"tool_name": "send_email", "tool_args": {"to": "admin@x.com", "content": "报告"}}]}
         return {"actions": []}
 
-    # 3. 初始化工作流
-    dummy_workflow = MarkdownWorkflow(
-        title="每日数据汇报",
-        steps=[
-            WorkflowStep(step_id="1", title="获取数据", tools=["fetch_data"], instruction="抓取今日数据"),
-            WorkflowStep(step_id="2", title="发送报告", tools=["send_email"], dependencies=["获取数据"], instruction="发邮件")
-        ]
-    )
-
-    # 4. 执行
+    # 3. 从目录加载所有工作流 (假设项目根目录下有个 workflows 文件夹)
+    workflows_dir = "workflows"
+    os.makedirs(workflows_dir, exist_ok=True) # 如果没有该目录，自动创建一个以供测试
+    
+    loaded_workflows = load_workflows_from_directory(workflows_dir)
     workflow_engine = WorkflowExecutor(tool_executor, mock_agent_run)
-    workflow_engine.execute(dummy_workflow)
+
+    # 4. 执行找到的第一个工作流 (如果有的话)
+    if loaded_workflows:
+        first_workflow_filename = list(loaded_workflows.keys())[0]
+        workflow_engine.execute(loaded_workflows[first_workflow_filename])
+    else:
+        logging.info(f"在 '{workflows_dir}' 目录中没有找到工作流，请添加 .md 文件后再试。")
